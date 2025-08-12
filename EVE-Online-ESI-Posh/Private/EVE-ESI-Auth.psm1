@@ -1,107 +1,143 @@
+Add-Type -AssemblyName System.Web
 
+function Connect-EveApi {
+    [CmdletBinding()]
+    param(
+        [string]$ClientId,
+        [string]$SecretKey,
+        [string]$CallbackUrl = "https://localhost/callback",
+        [string[]]$Scopes
+    )
 
+    $scopeString = $Scopes -join ' '
+    $state = (New-Guid).ToString()
+    # FIX: The EVE API requires the parameter to be 'client_id' (lowercase).
+    $authUrl = "https://login.eveonline.com/v2/oauth/authorize/?response_type=code&redirect_uri=$CallbackUrl&client_id=$ClientId&scope=$scopeString&state=$state"
 
-function login-EVESSOAuth ($clientid, $secretkey, $callbackURL, $Scopes) {
+    Write-Host "Your default browser will now open for EVE Online authentication." -ForegroundColor Yellow
+    Write-Host "After logging in and authorizing, copy the ENTIRE URL from your browser's address bar and paste it below."
+    Start-Process $authUrl
 
-    $ascope = $Scopes
-    $AuthUrl = "https://login.eveonline.com/oauth/authorize/"
-    $URL = $($AuthUrl)+'?response_type=code&redirect_uri='+$($callbackURL)+'&client_id='+$($clientid)+'&scope='+$($ascope)+'&state=defaultState'
+    $redirectUrl = Read-Host "`nPaste the full redirect URL from your browser here"
 
-    $ie = New-Object -comobject InternetExplorer.Application
-    $ie.visible = $true
-    $ie.silent = $true
-    Start-Sleep -Seconds 1
-    $ie.Navigate( $url )
-    while( $ie.busy){Start-Sleep 1}
+    try {
+        $uri = [System.Uri]$redirectUrl
+        $queryParts = [System.Web.HttpUtility]::ParseQueryString($uri.Query)
+        $code = $queryParts['code']
+        $returnedState = $queryParts['state']
+        
+        if ($returnedState -ne $state) {
+            Write-Error "State mismatch. Authentication cannot be trusted."
+            return
+        }
+        if (-not $code) {
+            Write-Error "Could not find authorization code in the provided URL."
+            return
+        }
+    }
+    catch {
+        Write-Error "Invalid URL provided. Could not parse the authorization code."
+        return
+    }
+    
+    # FIX: Standardized all parameter names to PascalCase for the call.
+    $token = Get-EveSsoToken -ClientId $ClientId -SecretKey $SecretKey -Code $code
 
-    do {start-sleep -Milliseconds 500 } until ($ie.LocationURL -like $($callbackURL)+"?code*")
-    while( $ie.busy){Start-Sleep 1}
-
-    $ReturnURL = $ie.LocationURL
-    $ReturnURL.Split('?&') | foreach { if ($_ -match "code") { $Code = ($_ -replace("code=",""))}  }
-    Write-Verbose "Returned Access Code: $($Code)"
-
-
-    $access_token = get-EVESSOToken -EncodedText -clientid $clientid -secretkey $secretkey -code $Code
-    Start-Sleep 2
-    $ie.Quit()
-    return $access_token ;
+    $characterInfo = Get-EveSsoCharacterID -Token $token
+    
+    Write-Host "`n✅ Authentication successful for character: $($characterInfo.CharacterName)" -ForegroundColor Green
+    
+    return $characterInfo
 }
+# FIX: Removed extra closing brace.
 
-
-function get-EVESSOToken ($clientid, $secretkey, $code) {
+# REFINEMENT: Converted to a standard advanced function.
+function Get-EveSsoToken {
+    [CmdletBinding()]
+    param(
+        [string]$ClientId,
+        [string]$SecretKey,
+        [string]$Code
+    )
 
     $uri = "https://login.eveonline.com/oauth/token"
     $header = @{
-          'Authorization' = ("Basic {0}" -f ([System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes(("{0}:{1}" -f $ClientID, $secretkey )))))
-          'Content-Type' = "application/x-www-form-urlencoded"
-           'Accept' = "application/json"
-           'Host' = "login.eveonline.com"
-     }
+        # FIX: Corrected variable name from $secretkey to $SecretKey to match parameter.
+        'Authorization' = ("Basic {0}" -f ([Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(("{0}:{1}" -f $ClientId, $SecretKey)))))
+        'Content-Type'  = "application/x-www-form-urlencoded"
+        'Host'          = "login.eveonline.com"
+    }
     $parameters = @{
-    'grant_type' = 'authorization_code'
-    'code' = $code
-     }
-
-    $access_token = $parameters | Invoke-RestMethod -Uri $uri -Method Post -Headers $header -Verbose
-    return $access_token ;
-}
-
-
-function refresh-EVESSOToken ($refreshtoken, $clientid, $secretkey) {
-
-    $uri = "https://login.eveonline.com/oauth/token"
-    $header = @{
-          'Authorization' = ("Basic {0}" -f ([System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes(("{0}:{1}" -f $ClientID, $secretkey )))))
-         #'Content-Type' = "application/json"
-          'Content-Type' = "application/x-www-form-urlencoded"
-           'Accept' = "application/json"
-           'Host' = "login.eveonline.com"
-     }
-
-    $parameters = @{
-
-      'grant_type' = 'refresh_token'
-      'refresh_token' = [string]$($refreshtoken)
-
-     }
-     $parameters | Invoke-RestMethod -Uri $uri -Method Post -Headers $header -Verbose 
- }
-
-
- 
-
-
-
-function verify-EVESSOAccessToken ($CharacterToken, $ClientID, $secretkey) {
-    $Token = $CharacterToken.token
-    if ($($CharacterToken.ExpiresOn -replace "T"," ") -lt $((get-date).ToUniversalTime().AddMinutes(+1) | get-date -Format "yyyy-MM-dd HH:mm:ss")) {
-        $Token = refresh-EVESSOToken -refreshtoken $token.refresh_token -clientid $ClientID -secretkey $secretkey
-
-        $CharacterToken = get-EVESSOCharacterID -Token $Token
+        'grant_type' = 'authorization_code'
+        'code'       = $Code
     }
 
-    $CharacterToken
+    return Invoke-RestMethod -Uri $uri -Method Post -Headers $header -Body $parameters
 }
 
+# FIX: Corrected typo in function name ("RefreshToken").
+# REFINEMENT: Converted to a standard advanced function.
+function Get-EveSsoRefreshToken {
+    [CmdletBinding()]
+    param(
+        [string]$RefreshToken,
+        [string]$ClientId,
+        [string]$SecretKey
+    )
 
-function get-EVESSOCharacterID ($Token) {
-
-    $uri = "https://login.eveonline.com/oauth/verify"
+    $uri = "https://login.eveonline.com/v2/oauth/token"
     $header = @{
-          'Authorization' = "Bearer " + $token.access_token
-          'Content-Type' = "application/x-www-form-urlencoded"
-           'Accept' = "application/json"
-           'Host' = "login.eveonline.com"
-     }
+        'Authorization' = ("Basic {0}" -f ([Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(("{0}:{1}" -f $ClientId, $SecretKey)))))
+        'Content-Type'  = "application/x-www-form-urlencoded"
+        'Host'          = "login.eveonline.com"
+    }
+    $parameters = @{
+        'grant_type'    = 'refresh_token'
+        'refresh_token' = $RefreshToken
+    }
 
-    $parameters = $null
-
-    $CharacterToken = $parameters | Invoke-RestMethod -Uri $uri -Method Get -Headers $header -Verbose
-
-    $CharacterToken | Add-Member -MemberType NoteProperty -Name Token -Value $token -Force
-    return $CharacterToken ;
+    return Invoke-RestMethod -Uri $uri -Method Post -Headers $header -Body $parameters
 }
 
+# REFINEMENT: Renamed to standard Verb-Noun and converted to advanced function.
+function Test-EveSsoAccessToken {
+    [CmdletBinding()]
+    param(
+        [object]$CharacterToken,
+        [string]$ClientId,
+        [string]$SecretKey
+    )
 
+    $token = $CharacterToken.Token
+    # REFINEMENT: More reliable DateTime comparison.
+    $expiryTime = [DateTime]::Parse($CharacterToken.ExpiresOn, $null, 'RoundtripKind')
+    
+    if ($expiryTime -lt (Get-Date).ToUniversalTime().AddMinutes(1)) {
+        Write-Verbose "Access token is expired or expiring soon. Refreshing..."
+        # FIX: Corrected function call to use the renamed Get-EveSsoRefreshToken.
+        $newToken = Get-EveSsoRefreshToken -RefreshToken $token.refresh_token -ClientId $ClientId -SecretKey $SecretKey
+        return Get-EveSsoCharacterID -Token $newToken
+    }
+    
+    # If token is still valid, return the original object.
+    return $CharacterToken
+}
 
+# REFINEMENT: Converted to a standard advanced function.
+function Get-EveSsoCharacterID {
+    [CmdletBinding()]
+    param(
+        [object]$Token # The full token object
+    )
+
+    $uri = "https://login.eveonline.com/v2/oauth/verify"
+    $header = @{
+        'Authorization' = "Bearer $($token.access_token)"
+        'Host'          = "login.eveonline.com"
+    }
+
+    $characterToken = Invoke-RestMethod -Uri $uri -Method Get -Headers $header
+    
+    $characterToken | Add-Member -MemberType NoteProperty -Name Token -Value $token -Force
+    return $characterToken
+}
